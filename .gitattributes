@@ -1,2 +1,559 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# =============================================================================
+# UNIFIED TETRAGON SSH MONITORING + ENRICHMENT POLICY
+# =============================================================================
+#
+# Purpose:
+#   Monitor and classify outbound TCP/22 activity from bare-metal Linux and
+#   Kubernetes workloads with four independent detection classes:
+#
+#     1. SSH_EXTERNAL_EGRESS
+#     2. SSH_INTERNAL_LATERAL
+#     3. SSH_ABNORMAL_CLIENT
+#     4. SSH_APPLICATION_CONTAINER
+#
+# Design:
+#   - Monitoring only: no blocking, SIGKILL, or override actions.
+#   - tcp_connect():22 is SSH-intent telemetry; it does not prove SSHv2.
+#   - Four separate TracingPolicy resources allow one connection to receive
+#     multiple classifications.
+#   - Enrichment/risk configuration is included as a ConfigMap so the entire
+#     package can be managed as one Kubernetes YAML artifact.
+#
+# Prerequisite:
+#   Enable Tetragon ancestor collection:
+#
+#       --enable-ancestors=base,kprobe
+#
+# IMPORTANT:
+#   Replace all placeholder enterprise CIDRs, allowlists, workload identities,
+#   and example approved destinations before production deployment.
+# =============================================================================
+
+
+# =============================================================================
+# POLICY 1 — EXTERNAL SSH EGRESS
+# =============================================================================
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ssh-external-egress
+  labels:
+    security.openai.example/category: ssh-monitoring
+    security.openai.example/class: external-egress
+
+spec:
+  kprobes:
+    - call: tcp_connect
+      syscall: false
+
+      message: "SSH_EXTERNAL_EGRESS"
+
+      tags:
+        - ssh
+        - tcp22
+        - external-egress
+        - exfiltration
+
+      args:
+        - index: 0
+          type: sock
+          label: socket
+
+      selectors:
+        - label: ssh-external-egress
+
+          matchArgs:
+            - index: 0
+              operator: DPort
+              values:
+                - "22"
+
+            - index: 0
+              operator: NotDAddr
+              values:
+                # Local/loopback
+                - "127.0.0.0/8"
+                - "169.254.0.0/16"
+                - "::1/128"
+                - "fe80::/10"
+
+                # ----------------------------------------------------------------
+                # TRUSTED ENTERPRISE SPACE — REPLACE WITH ACTUAL PREFIXES
+                # ----------------------------------------------------------------
+                - "10.0.0.0/8"
+                - "172.16.0.0/12"
+                - "192.168.0.0/16"
+                - "fc00::/7"
+
+          matchActions:
+            - action: Post
+              rateLimit: "1s"
+              rateLimitScope: process
+
+
+# =============================================================================
+# POLICY 2 — INTERNAL SSH / LATERAL MOVEMENT
+# =============================================================================
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ssh-internal-lateral-movement
+  labels:
+    security.openai.example/category: ssh-monitoring
+    security.openai.example/class: internal-lateral
+
+spec:
+  kprobes:
+    - call: tcp_connect
+      syscall: false
+
+      message: "SSH_INTERNAL_LATERAL"
+
+      tags:
+        - ssh
+        - tcp22
+        - internal
+        - lateral-movement
+
+      args:
+        - index: 0
+          type: sock
+          label: socket
+
+      selectors:
+        - label: ssh-internal-lateral
+
+          matchArgs:
+            - index: 0
+              operator: DPort
+              values:
+                - "22"
+
+            - index: 0
+              operator: DAddr
+              values:
+                # ----------------------------------------------------------------
+                # ENTERPRISE INTERNAL SPACE — REPLACE WITH ACTUAL PREFIXES
+                # ----------------------------------------------------------------
+                - "10.0.0.0/8"
+                - "172.16.0.0/12"
+                - "192.168.0.0/16"
+                - "fc00::/7"
+
+            - index: 0
+              operator: NotDAddr
+              values:
+                - "127.0.0.0/8"
+                - "::1/128"
+
+          matchActions:
+            - action: Post
+              rateLimit: "1s"
+              rateLimitScope: process
+
+
+# =============================================================================
+# POLICY 3 — ABNORMAL SSH CLIENT PROCESS
+# =============================================================================
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ssh-abnormal-client
+  labels:
+    security.openai.example/category: ssh-monitoring
+    security.openai.example/class: abnormal-client
+
+spec:
+  kprobes:
+    - call: tcp_connect
+      syscall: false
+
+      message: "SSH_ABNORMAL_CLIENT"
+
+      tags:
+        - ssh
+        - tcp22
+        - process-anomaly
+        - lateral-movement
+        - exfiltration
+
+      args:
+        - index: 0
+          type: sock
+          label: socket
+
+      selectors:
+        - label: ssh-abnormal-client
+
+          matchArgs:
+            - index: 0
+              operator: DPort
+              values:
+                - "22"
+
+          matchBinaries:
+            - operator: NotIn
+              values:
+                # ----------------------------------------------------------------
+                # APPROVED SSH CLIENTS — CUSTOMIZE
+                # ----------------------------------------------------------------
+                - "/usr/bin/ssh"
+                - "/usr/bin/scp"
+                - "/usr/bin/sftp"
+
+          matchActions:
+            - action: Post
+              rateLimit: "1s"
+              rateLimitScope: process
+
+
+# =============================================================================
+# POLICY 4 — SSH FROM APPLICATION CONTAINERS
+# =============================================================================
+---
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: ssh-application-container
+  labels:
+    security.openai.example/category: ssh-monitoring
+    security.openai.example/class: application-container
+
+spec:
+  podSelector:
+    matchExpressions:
+      - key: security.tetragon.io/workload-type
+        operator: In
+        values:
+          - application
+
+  kprobes:
+    - call: tcp_connect
+      syscall: false
+
+      message: "SSH_APPLICATION_CONTAINER"
+
+      tags:
+        - ssh
+        - tcp22
+        - kubernetes
+        - application-container
+        - lateral-movement
+        - exfiltration
+
+      args:
+        - index: 0
+          type: sock
+          label: socket
+
+      selectors:
+        - label: ssh-application-container
+
+          matchArgs:
+            - index: 0
+              operator: DPort
+              values:
+                - "22"
+
+          matchActions:
+            - action: Post
+              rateLimit: "1s"
+              rateLimitScope: process
+
+
+# =============================================================================
+# ENRICHMENT / ALLOWLIST / RISK CONFIGURATION
+#
+# This ConfigMap is NOT interpreted by Tetragon itself.
+# It is intended for a SIEM, stream processor, daemon, or enrichment service
+# consuming Tetragon events.
+# =============================================================================
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tetragon-ssh-enrichment
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: tetragon-ssh-enrichment
+    security.openai.example/category: ssh-monitoring
+
+data:
+  policy.yaml: |
+    version: 1
+
+    correlation:
+      primary_process_key: process.exec_id
+
+      fallback_process_key:
+        - node.name
+        - process.pid
+        - process.start_time
+
+      correlation_window_seconds: 300
+
+    network_zones:
+
+      loopback:
+        - "127.0.0.0/8"
+        - "::1/128"
+
+      link_local:
+        - "169.254.0.0/16"
+        - "fe80::/10"
+
+      enterprise_internal:
+        # --------------------------------------------------------------------
+        # REPLACE WITH ACTUAL ENTERPRISE PREFIXES
+        # --------------------------------------------------------------------
+        - "10.0.0.0/8"
+        - "172.16.0.0/12"
+        - "192.168.0.0/16"
+        - "fc00::/7"
+
+      management:
+        # EXAMPLE ONLY
+        - "10.30.0.0/16"
+
+      server:
+        # EXAMPLE ONLY
+        - "10.40.0.0/16"
+
+      user:
+        # EXAMPLE ONLY
+        - "10.50.0.0/16"
+
+      kubernetes_pods:
+        # EXAMPLE ONLY
+        - "10.244.0.0/16"
+
+      kubernetes_services:
+        # EXAMPLE ONLY
+        - "10.96.0.0/12"
+
+      vpn_remote_access: []
+
+      cloud_vpc: []
+
+      external_approved: []
+
+    approved_ssh_clients:
+
+      paths:
+        - "/usr/bin/ssh"
+        - "/usr/bin/scp"
+        - "/usr/bin/sftp"
+
+      sha256: []
+      #
+      # Example:
+      #
+      # - path: "/usr/bin/ssh"
+      #   digest: "<sha256>"
+
+    approved_destinations:
+
+      bastion:
+        # EXAMPLES ONLY
+        - "10.30.10.10/32"
+        - "10.30.10.11/32"
+
+      network_management:
+        # EXAMPLE ONLY
+        - "10.30.0.0/16"
+
+      backup: []
+
+      external_vendor: []
+
+    approved_workloads:
+
+      kubernetes:
+        - namespace: platform
+          workload_kind: Deployment
+          workload_name: ssh-bastion
+          container: "*"
+
+      host:
+        # Example automated SSH initiator
+        - binary: "/opt/company/bin/deployment-agent"
+
+    high_risk_executable_paths:
+      - "/tmp/"
+      - "/var/tmp/"
+      - "/dev/shm/"
+      - "/run/user/"
+
+    high_risk_parent_binaries:
+      - "/usr/sbin/nginx"
+      - "/usr/sbin/httpd"
+      - "/usr/sbin/apache2"
+      - "/usr/bin/php"
+      - "/usr/bin/node"
+
+    hashing:
+      algorithm: sha256
+      strategy: hash-on-exec-cache
+
+      cache_key_preference:
+        - process.exec_id
+        - device+inode
+
+      retain_container_image_digest: true
+
+    kubernetes:
+
+      application_label:
+        key: security.tetragon.io/workload-type
+        value: application
+
+      production_namespace_patterns:
+        - "*-prod"
+        - "prod-*"
+        - "production"
+
+    risk_model:
+
+      base:
+        SSH_EXTERNAL_EGRESS: 20
+        SSH_INTERNAL_LATERAL: 15
+        SSH_ABNORMAL_CLIENT: 25
+        SSH_APPLICATION_CONTAINER: 25
+
+      modifiers:
+
+        destination_not_approved: 20
+        executable_not_approved: 20
+        executable_hash_mismatch: 35
+
+        uid_zero: 15
+
+        application_container: 20
+        production_namespace: 10
+
+        high_risk_executable_path: 30
+        abnormal_parent: 25
+
+        workload_not_approved_for_ssh: 20
+
+        approved_destination: -25
+        approved_executable: -15
+        approved_workload: -20
+
+      severity:
+        info:
+          minimum: 0
+          maximum: 19
+
+        low:
+          minimum: 20
+          maximum: 39
+
+        medium:
+          minimum: 40
+          maximum: 59
+
+        high:
+          minimum: 60
+          maximum: 79
+
+        critical:
+          minimum: 80
+
+    mitre_attack:
+
+      SSH_INTERNAL_LATERAL:
+        - technique: "T1021.004"
+          name: "Remote Services: SSH"
+
+      SSH_ABNORMAL_CLIENT:
+        - technique: "T1021.004"
+          name: "Remote Services: SSH"
+
+      SSH_APPLICATION_CONTAINER:
+        - technique: "T1021.004"
+          name: "Remote Services: SSH"
+
+      SSH_EXTERNAL_EGRESS:
+        - technique: "T1041"
+          name: "Exfiltration Over C2 Channel"
+          qualification: >
+            Contextual mapping only. TCP/22 egress does not by itself prove
+            that exfiltration occurred.
+
+    normalized_event:
+
+      required_fields:
+        - timestamp
+        - detection_classes
+        - process.exec_id
+        - process.pid
+        - process.uid
+        - process.binary
+        - process.parent
+        - process.ancestors
+        - network.source.ip
+        - network.source.port
+        - network.destination.ip
+        - network.destination.port
+        - network.destination.zone
+        - network.destination.approved
+        - risk.score
+        - risk.severity
+        - risk.reasons
+
+      kubernetes_fields:
+        - kubernetes.namespace
+        - kubernetes.pod
+        - kubernetes.workload_kind
+        - kubernetes.workload_name
+        - kubernetes.container
+        - kubernetes.image
+        - kubernetes.image_digest
+
+      executable_identity:
+        - process.binary
+        - process.sha256
+        - process.approved_path
+        - process.approved_hash
+
+    classification_logic:
+
+      combine_independent_policy_hits: true
+
+      examples:
+
+        approved_admin_to_bastion:
+          detections:
+            - SSH_INTERNAL_LATERAL
+          expected_severity: low
+
+        abnormal_internal:
+          detections:
+            - SSH_INTERNAL_LATERAL
+            - SSH_ABNORMAL_CLIENT
+          expected_severity: high
+
+        application_container_internal:
+          detections:
+            - SSH_INTERNAL_LATERAL
+            - SSH_APPLICATION_CONTAINER
+          expected_severity: high
+
+        compromised_application_container:
+          detections:
+            - SSH_INTERNAL_LATERAL
+            - SSH_ABNORMAL_CLIENT
+            - SSH_APPLICATION_CONTAINER
+          expected_severity: critical
+
+        application_container_external:
+          detections:
+            - SSH_EXTERNAL_EGRESS
+            - SSH_ABNORMAL_CLIENT
+            - SSH_APPLICATION_CONTAINER
+          expected_severity: critical
+
