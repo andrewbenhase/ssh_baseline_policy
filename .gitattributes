@@ -18,6 +18,8 @@
 #     multiple classifications.
 #   - Enrichment/risk configuration is included as a ConfigMap so the entire
 #     package can be managed as one Kubernetes YAML artifact.
+#   - Normalized SSH detections are configured for syslog delivery to
+#     Splunk at 192.168.10.1:514/TCP (RFC 5424, local5).
 #
 # Prerequisite:
 #   Enable Tetragon ancestor collection:
@@ -484,6 +486,45 @@ data:
             Contextual mapping only. TCP/22 egress does not by itself prove
             that exfiltration occurred.
 
+    syslog_output:
+
+      enabled: true
+
+      destination:
+        host: "192.168.10.1"
+        port: 514
+
+      transport: tcp
+      tls: false
+
+      format: rfc5424
+      facility: local5
+      application_name: tetragon-ssh
+
+      payload: normalized-json
+
+      send_detection_classes:
+        - SSH_EXTERNAL_EGRESS
+        - SSH_INTERNAL_LATERAL
+        - SSH_ABNORMAL_CLIENT
+        - SSH_APPLICATION_CONTAINER
+
+      severity_mapping:
+        critical: crit
+        high: err
+        medium: warning
+        low: notice
+        info: info
+
+      reliability:
+        persistent_queue: true
+        retry_indefinitely: true
+
+      notes:
+        - "Default target is Splunk/syslog collector at 192.168.10.1:514 over TCP."
+        - "If Splunk is configured for TLS syslog, change port to 6514 and tls to true."
+        - "Prefer forwarding only normalized SSH detection events rather than the complete raw Tetragon stream."
+
     normalized_event:
 
       required_fields:
@@ -556,4 +597,3 @@ data:
             - SSH_ABNORMAL_CLIENT
             - SSH_APPLICATION_CONTAINER
           expected_severity: critical
-
